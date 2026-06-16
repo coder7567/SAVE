@@ -60,7 +60,7 @@ const RadarPulse = ({ color, size }) => {
   const renderRing = (animValue) => {
     const scale = animValue.interpolate({
       inputRange: [0, 1],
-      outputRange: [0.8, 3.5],
+      outputRange: [26 / size, 1.0],
     });
     const opacity = animValue.interpolate({
       inputRange: [0, 0.8, 1],
@@ -99,19 +99,19 @@ const RadarPulse = ({ color, size }) => {
 const HazardMarker = ({ hazard, onPress }) => {
   const isCritical = hazard.severity === 'CRITICAL';
   const color = isCritical ? '#FF3333' : '#FFCC00';
-  const size = isCritical ? 26 : 24;
 
   return (
     <Marker
       coordinate={hazard.coordinate}
       onPress={() => onPress(hazard)}
       anchor={{ x: 0.5, y: 0.5 }}
+      style={{ width: 96, height: 96 }}
     >
       <View style={styles.hazardMarkerWrapper}>
-        <RadarPulse color={color} size={size} />
-        <View style={isCritical ? styles.criticalGlow : styles.minimalGlow}>
+        <RadarPulse color={color} size={90} />
+        <View style={[isCritical ? styles.criticalGlow : styles.minimalGlow, styles.hazardIcon]}>
           {isCritical ? (
-            <Svg height={size} width={size} viewBox="0 0 26 26">
+            <Svg height={26} width={26} viewBox="0 0 26 26">
               {/* Solid Crimson Red Cross */}
               <Path
                 d="M 9,2 H 17 V 9 H 24 V 17 H 17 V 24 H 9 V 17 H 2 V 9 H 9 Z"
@@ -119,7 +119,7 @@ const HazardMarker = ({ hazard, onPress }) => {
               />
             </Svg>
           ) : (
-            <Svg height={size} width={size} viewBox="0 0 24 24">
+            <Svg height={24} width={24} viewBox="0 0 24 24">
               {/* Hollow Yellow Triangle */}
               <Polygon
                 points="12,2 2,22 22,22"
@@ -161,6 +161,11 @@ const MapScreen = () => {
   const [connected, setConnected] = useState(false);
   const [textInput, setTextInput] = useState('');
   const socketRef = useRef(null);
+
+  // Tactical Sliding Mission Control Hub States
+  const [activeTab, setActiveTab] = useState("RADAR"); // Options: "RADAR" or "COMMS"
+  const [isHubExpanded, setIsHubExpanded] = useState(false);
+  const hubAnim = useRef(new Animated.Value(-500)).current;
 
   const convoyId = 'C-1';
   const clientId = 'User-1';
@@ -209,8 +214,19 @@ const MapScreen = () => {
 
   const loadActiveHazards = async () => {
     try {
-      const hazards = await getActiveHazards();
-      setActiveHazards(hazards);
+      const dbHazards = await getActiveHazards();
+      setActiveHazards((prev) => {
+        const merged = [...dbHazards];
+        prev.forEach((h) => {
+          if (!merged.some((dbH) => dbH.id === h.id)) {
+            // Keep recently reported/synced hazards (within 30 seconds) to prevent premature deletion by out-of-sync polling
+            if (h.createdAt && Date.now() - h.createdAt < 30000) {
+              merged.push(h);
+            }
+          }
+        });
+        return merged;
+      });
     } catch (err) {
       console.error('[TELEMETRY-ERROR] loadActiveHazards failed:', err);
     }
@@ -309,6 +325,39 @@ const MapScreen = () => {
               setActiveMembers(prev => prev.filter(m => m.id !== departedId));
             }
           }
+
+          // Handle incoming real-time hazard sync events
+          if (payload.event === 'new_hazard') {
+            const rawHazard = payload.hazard_data;
+            if (rawHazard) {
+              const hazard = {
+                id: rawHazard.id || `HAZ_${Math.floor(100 + Math.random() * 900)}`,
+                type: rawHazard.type,
+                severity: rawHazard.severity,
+                coordinate: {
+                  latitude: parseFloat(rawHazard.latitude),
+                  longitude: parseFloat(rawHazard.longitude),
+                },
+                reportedBy: rawHazard.reportedBy || 'User-1',
+                timeAgo: rawHazard.timeAgo || 'JUST NOW',
+                createdAt: Date.now(), // timestamp for merging
+              };
+
+              // UI Notification Action
+              Alert.alert(
+                '⚠️ EMERGENCY TRAIL UPDATE',
+                `Type: ${hazard.type}\nSeverity: ${hazard.severity}\nReported By: @${hazard.reportedBy}`
+              );
+
+              // State Sync - check duplicate to prevent clashing keys
+              setActiveHazards((prev) => {
+                if (prev.some((h) => h.id === hazard.id)) {
+                  return prev;
+                }
+                return [...prev, hazard];
+              });
+            }
+          }
         } catch (err) {
           console.error('[TELEMETRY-WS] Error parsing WS message payload:', err);
         }
@@ -377,6 +426,16 @@ const MapScreen = () => {
       Alert.alert('Transmission Failed', 'No active WebSocket connection. Check signal.');
     }
   };
+
+  // Slide animation trigger for the mission control hub drawer
+  useEffect(() => {
+    Animated.spring(hubAnim, {
+      toValue: isHubExpanded ? 0 : -500,
+      useNativeDriver: true,
+      tension: 30,
+      friction: 7,
+    }).start();
+  }, [isHubExpanded, hubAnim]);
 
   useEffect(() => {
     if (selectedHazard) {
@@ -508,6 +567,7 @@ const MapScreen = () => {
         onRegionChangeComplete={(region) => {
           setMapCenter(region);
         }}
+        onPress={() => setIsHubExpanded(false)}
       >
         {/* User Current Location Marker */}
         {userLocation && (
@@ -569,7 +629,7 @@ const MapScreen = () => {
           <HazardMarker
             key={hazard.id}
             hazard={hazard}
-            onPress={setSelectedHazard}
+            onPress={(h) => setSelectedHazard(h)}
           />
         ))}
 
@@ -612,55 +672,100 @@ const MapScreen = () => {
         <View style={styles.reticleDot} />
       </View>
 
-      {/* UI.12 Convoy Overlay Radar UI */}
-      <ConvoyOverlay activeMembers={activeMembers} connected={connected} />
+      {/* Toggle Notification Strip */}
+      <TouchableOpacity
+        style={styles.statusBar}
+        onPress={() => setIsHubExpanded(!isHubExpanded)}
+        activeOpacity={0.9}
+      >
+        <Text style={styles.statusBarText} numberOfLines={1}>
+          🛰️ SQUADRON STATUS: [ {activeMembers.length} ACTIVE ] // LAST MSG: {commsLog.length > 0 ? commsLog[commsLog.length - 1].text : "NO TRANSMISSIONS"}
+        </Text>
+      </TouchableOpacity>
 
-      {/* Tactical Comms & Mission Messaging Interface */}
-      <View style={styles.commsPanel}>
-        <FlatList
-          data={commsLog.slice(-4)}
-          keyExtractor={(item) => item.id}
-          renderItem={({ item }) => (
-            <Text style={styles.commsText} numberOfLines={1}>
-              {` [${item.time}] @${item.sender}: ${item.text}`}
-            </Text>
-          )}
-          style={styles.commsFeed}
-        />
-        
-        <View style={styles.inputRow}>
-          <TextInput
-            style={styles.textInput}
-            value={textInput}
-            onChangeText={setTextInput}
-            placeholder="ENTER TACTICAL MESSAGE..."
-            placeholderTextColor="#555555"
-            underlineColorAndroid="transparent"
-          />
+      {/* Unified tabbed dashboard drawer container */}
+      <Animated.View style={[styles.hubDrawer, { transform: [{ translateY: hubAnim }] }]}>
+        <View style={styles.tabHeader}>
           <TouchableOpacity
-            style={styles.transmitButton}
-            onPress={() => sendMessage(textInput)}
+            style={[styles.tabButton, activeTab === 'RADAR' ? styles.tabActive : styles.tabInactive]}
+            onPress={() => setActiveTab('RADAR')}
             activeOpacity={0.8}
           >
-            <Text style={styles.transmitButtonText}>[ TRANSMIT ]</Text>
+            <Text style={[styles.tabButtonText, activeTab === 'RADAR' ? styles.tabTextActive : styles.tabTextInactive]}>
+              [ 🛰️ CONVOY RADAR ]
+            </Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[styles.tabButton, activeTab === 'COMMS' ? styles.tabActive : styles.tabInactive]}
+            onPress={() => setActiveTab('COMMS')}
+            activeOpacity={0.8}
+          >
+            <Text style={[styles.tabButtonText, activeTab === 'COMMS' ? styles.tabTextActive : styles.tabTextInactive]}>
+              [ 💬 COMMS MATRIX ]
+            </Text>
           </TouchableOpacity>
         </View>
 
-        <View style={styles.macroRow}>
-          <TouchableOpacity style={styles.macroButton} onPress={() => sendMessage('🛑 HOLD')}>
-            <Text style={styles.macroButtonText}>[ 🛑 HOLD ]</Text>
-          </TouchableOpacity>
-          <TouchableOpacity style={styles.macroButton} onPress={() => sendMessage('🚜 STUCK')}>
-            <Text style={styles.macroButtonText}>[ 🚜 STUCK ]</Text>
-          </TouchableOpacity>
-          <TouchableOpacity style={styles.macroButton} onPress={() => sendMessage('⛽ LOW FUEL')}>
-            <Text style={styles.macroButtonText}>[ ⛽ LOW FUEL ]</Text>
-          </TouchableOpacity>
-          <TouchableOpacity style={styles.macroButton} onPress={() => sendMessage('🟢 CLEAR')}>
-            <Text style={styles.macroButtonText}>[ 🟢 CLEAR ]</Text>
-          </TouchableOpacity>
-        </View>
-      </View>
+        {activeTab === 'RADAR' && (
+          <ConvoyOverlay activeMembers={activeMembers} connected={connected} />
+        )}
+
+        {activeTab === 'COMMS' && (
+          <View>
+            <FlatList
+              data={commsLog.slice(-4)}
+              keyExtractor={(item) => item.id}
+              renderItem={({ item }) => (
+                <Text style={styles.commsText} numberOfLines={1}>
+                  {` [${item.time}] @${item.sender}: ${item.text}`}
+                </Text>
+              )}
+              style={styles.commsFeed}
+            />
+            
+            <View style={styles.inputRow}>
+              <TextInput
+                style={styles.textInput}
+                value={textInput}
+                onChangeText={setTextInput}
+                placeholder="ENTER TACTICAL MESSAGE..."
+                placeholderTextColor="#555555"
+                underlineColorAndroid="transparent"
+              />
+              <TouchableOpacity
+                style={styles.transmitButton}
+                onPress={() => sendMessage(textInput)}
+                activeOpacity={0.8}
+              >
+                <Text style={styles.transmitButtonText}>[ TRANSMIT ]</Text>
+              </TouchableOpacity>
+            </View>
+
+            <View style={styles.macroRow}>
+              <TouchableOpacity style={styles.macroButton} onPress={() => sendMessage('🛑 HOLD')}>
+                <Text style={styles.macroButtonText}>[ 🛑 HOLD ]</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={styles.macroButton} onPress={() => sendMessage('🚜 STUCK')}>
+                <Text style={styles.macroButtonText}>[ 🚜 STUCK ]</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={styles.macroButton} onPress={() => sendMessage('⛽ LOW FUEL')}>
+                <Text style={styles.macroButtonText}>[ ⛽ LOW FUEL ]</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={styles.macroButton} onPress={() => sendMessage('🟢 CLEAR')}>
+                <Text style={styles.macroButtonText}>[ 🟢 CLEAR ]</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        )}
+
+        <TouchableOpacity
+          style={styles.closePanelButton}
+          onPress={() => setIsHubExpanded(false)}
+          activeOpacity={0.8}
+        >
+          <Text style={styles.closePanelButtonText}>[ ❌ CLOSE PANEL ]</Text>
+        </TouchableOpacity>
+      </Animated.View>
 
       <SafeAreaView style={styles.overlayContainer}>
         {/* Top Panel: Shortcut Slider */}
@@ -840,7 +945,18 @@ const MapScreen = () => {
         onClose={() => setHazardModalVisible(false)}
         latitude={userLocation ? userLocation.latitude : initialRegion.latitude}
         longitude={userLocation ? userLocation.longitude : initialRegion.longitude}
-        onReportSubmitted={loadActiveHazards}
+        onReportSubmitted={(newHazard) => {
+          if (newHazard) {
+            setActiveHazards((prev) => {
+              if (prev.some((h) => h.id === newHazard.id)) {
+                return prev;
+              }
+              return [...prev, newHazard];
+            });
+          }
+          loadActiveHazards();
+        }}
+        socketRef={socketRef}
       />
     </View>
   );
@@ -869,11 +985,20 @@ const styles = StyleSheet.create({
   hazardMarkerWrapper: {
     justifyContent: 'center',
     alignItems: 'center',
-    width: 60,
-    height: 60,
+    width: 96,
+    height: 96,
   },
   pulseContainer: {
     position: 'absolute',
+    width: 90,
+    height: 90,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  hazardIcon: {
+    width: 26,
+    height: 26,
+    zIndex: 2,
     justifyContent: 'center',
     alignItems: 'center',
   },
@@ -907,6 +1032,7 @@ const styles = StyleSheet.create({
     padding: 16,
     paddingBottom: 32,
     zIndex: 9999,
+    elevation: 20,
   },
   hudContent: {
     width: '100%',
@@ -1229,17 +1355,82 @@ const styles = StyleSheet.create({
     marginBottom: 4,
     textAlign: 'center',
   },
-  commsPanel: {
+  statusBar: {
     position: 'absolute',
-    top: 325,
+    top: 130,
     left: 16,
     right: 16,
     backgroundColor: 'rgba(10, 10, 10, 0.9)',
     borderWidth: 1,
     borderColor: '#333333',
-    borderRadius: 8,
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    zIndex: 1000,
+  },
+  statusBarText: {
+    color: '#00FF66',
+    fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
+    fontSize: 10,
+    fontWeight: 'bold',
+  },
+  hubDrawer: {
+    position: 'absolute',
+    top: 170,
+    left: 16,
+    right: 16,
+    backgroundColor: 'rgba(10, 10, 10, 0.95)',
+    borderWidth: 1,
+    borderColor: '#333333',
     padding: 12,
     zIndex: 999,
+  },
+  tabHeader: {
+    flexDirection: 'row',
+    borderBottomWidth: 1,
+    borderBottomColor: '#333333',
+    marginBottom: 8,
+  },
+  tabButton: {
+    flex: 1,
+    paddingVertical: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  tabActive: {
+    borderBottomWidth: 2,
+    borderBottomColor: '#00FF66',
+  },
+  tabInactive: {
+    borderBottomWidth: 2,
+    borderBottomColor: 'transparent',
+  },
+  tabButtonText: {
+    fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
+    fontSize: 11,
+    fontWeight: 'bold',
+  },
+  tabTextActive: {
+    color: '#00FF66',
+  },
+  tabTextInactive: {
+    color: '#555555',
+  },
+  closePanelButton: {
+    marginTop: 10,
+    borderWidth: 1,
+    borderColor: '#FF3333',
+    paddingVertical: 8,
+    alignItems: 'center',
+    backgroundColor: 'rgba(255, 51, 51, 0.05)',
+  },
+  closePanelButtonText: {
+    color: '#FF3333',
+    fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
+    fontSize: 11,
+    fontWeight: 'bold',
   },
   commsFeed: {
     maxHeight: 70,
@@ -1265,7 +1456,6 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(0, 0, 0, 0.5)',
     borderWidth: 1,
     borderColor: '#333333',
-    borderRadius: 4,
     color: '#00FF66',
     fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
     fontSize: 12,
@@ -1276,7 +1466,6 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(0, 255, 102, 0.1)',
     borderWidth: 1,
     borderColor: '#00FF66',
-    borderRadius: 4,
     height: 36,
     justifyContent: 'center',
     paddingHorizontal: 12,
@@ -1297,7 +1486,6 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(30, 30, 30, 0.8)',
     borderWidth: 1,
     borderColor: '#333333',
-    borderRadius: 4,
     paddingVertical: 6,
     marginHorizontal: 2,
     alignItems: 'center',
