@@ -10,6 +10,8 @@ import {
   Animated,
   Platform,
   Pressable,
+  FlatList,
+  TextInput,
 } from 'react-native';
 import MapView, { Polyline, Marker, PROVIDER_GOOGLE } from 'react-native-maps';
 import Slider from '@react-native-community/slider';
@@ -154,6 +156,16 @@ const MapScreen = () => {
   const [activeMembers, setActiveMembers] = useState([]);
   const drawerAnim = useRef(new Animated.Value(350)).current;
 
+  // Tactical Comms & Mission Messaging Interface States
+  const [commsLog, setCommsLog] = useState([]);
+  const [connected, setConnected] = useState(false);
+  const [textInput, setTextInput] = useState('');
+  const socketRef = useRef(null);
+
+  const convoyId = 'C-1';
+  const clientId = 'User-1';
+  const WS_URL = `ws://127.0.0.1:8000/api/convoy/${convoyId}/${clientId}`;
+
   const routeRequested = useRef(false);
   
   // Marion, Iowa center coordinate setup for testing
@@ -228,6 +240,143 @@ const MapScreen = () => {
     }, 12000);
     return () => clearInterval(intervalId);
   }, []);
+
+  // WebSockets pipeline connection for Convoy Mode telemetry and Comms Log
+  useEffect(() => {
+    console.log('[TELEMETRY-WS] MapScreen useEffect: Initiating Socket Life-Cycle.');
+    console.log('[TELEMETRY-WS] Evaluating target WS_URL string:', WS_URL);
+
+    try {
+      socketRef.current = new WebSocket(WS_URL);
+      console.log('[TELEMETRY-WS] WebSocket instance successfully created.');
+    } catch (wsInitError) {
+      console.error('[TELEMETRY-WS] CRITICAL: Failed to construct WebSocket instance:', wsInitError.message, wsInitError);
+    }
+
+    if (socketRef.current) {
+      socketRef.current.onopen = () => {
+        setConnected(true);
+        console.log('[TELEMETRY-WS] socketRef.current.onopen triggered. Convoy WS connected.');
+      };
+
+      socketRef.current.onmessage = (event) => {
+        console.log('[TELEMETRY-WS] socketRef.current.onmessage: Data packet received. Data length:', event.data ? event.data.length : 0);
+        try {
+          const payload = JSON.parse(event.data);
+          console.log('[TELEMETRY-WS] parsed payload:', JSON.stringify(payload));
+          
+          // Handle coordinate/status packets from other members
+          if (payload.sender_id) {
+            setActiveMembers(prev => {
+              const index = prev.findIndex(m => m.id === payload.sender_id);
+              const memberData = {
+                id: payload.sender_id,
+                lat: payload.latitude?.toFixed(5) || '0.0000',
+                lon: payload.longitude?.toFixed(5) || '0.0000',
+                heading: payload.heading !== undefined ? parseFloat(payload.heading) : 0,
+                status: payload.chat_message || 'Active',
+                timestamp: new Date().toLocaleTimeString(),
+              };
+
+              if (index !== -1) {
+                const updated = [...prev];
+                updated[index] = memberData;
+                return updated;
+              } else {
+                return [...prev, memberData];
+              }
+            });
+
+            // Handle incoming chat messages
+            if (payload.chat_message) {
+              setCommsLog(prev => {
+                const newMsg = {
+                  id: Date.now().toString(),
+                  sender: payload.sender_id,
+                  text: payload.chat_message,
+                  time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+                };
+                const updated = [...prev, newMsg];
+                return updated.slice(-20);
+              });
+            }
+          }
+
+          // Handle system disconnect events
+          if (payload.event === 'disconnect' && payload.message) {
+            const departedId = payload.message.match(/Client (\S+) has left/)?.[1];
+            if (departedId) {
+              setActiveMembers(prev => prev.filter(m => m.id !== departedId));
+            }
+          }
+        } catch (err) {
+          console.error('[TELEMETRY-WS] Error parsing WS message payload:', err);
+        }
+      };
+
+      socketRef.current.onerror = (e) => {
+        console.error('==================== [Convoy WS ERROR DETECTED] ====================');
+        console.error('e.message:', e.message);
+        try {
+          console.error('Raw WebSocket Error Event object stringified:', JSON.stringify(e));
+        } catch (stringifyError) {
+          console.error('Could not stringify WebSocket error event object:', stringifyError.message);
+        }
+        console.error('=====================================================================');
+      };
+
+      socketRef.current.onclose = (closeEvent) => {
+        setConnected(false);
+        console.log('==================== [Convoy WS CLOSED] ====================');
+        console.log('closeEvent.code:', closeEvent?.code);
+        console.log('closeEvent.reason:', closeEvent?.reason);
+        console.log('closeEvent.wasClean:', closeEvent?.wasClean);
+        console.log('===========================================================');
+      };
+    }
+
+    return () => {
+      console.log('[TELEMETRY-WS] MapScreen useEffect Cleanup: Closing Convoy WS connection.');
+      if (socketRef.current) {
+        socketRef.current.close();
+      }
+    };
+  }, []);
+
+  const sendMessage = (textToSend) => {
+    if (!textToSend || !textToSend.trim()) return;
+
+    const lat = userLocation?.latitude || 42.033;
+    const lon = userLocation?.longitude || -91.598;
+
+    const payload = {
+      latitude: lat,
+      longitude: lon,
+      chat_message: textToSend,
+    };
+
+    if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
+      socketRef.current.send(JSON.stringify(payload));
+      
+      // Update local ledger for the sender (since server broadcasts to others only)
+      setCommsLog(prev => {
+        const updated = [
+          ...prev,
+          {
+            id: Date.now().toString() + '-self',
+            sender: 'User-1', // client_id
+            text: textToSend,
+            time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+          }
+        ];
+        return updated.slice(-20);
+      });
+
+      setTextInput('');
+    } else {
+      Alert.alert('Transmission Failed', 'No active WebSocket connection. Check signal.');
+    }
+  };
 
   useEffect(() => {
     if (selectedHazard) {
@@ -464,7 +613,54 @@ const MapScreen = () => {
       </View>
 
       {/* UI.12 Convoy Overlay Radar UI */}
-      <ConvoyOverlay activeMembers={activeMembers} setActiveMembers={setActiveMembers} />
+      <ConvoyOverlay activeMembers={activeMembers} connected={connected} />
+
+      {/* Tactical Comms & Mission Messaging Interface */}
+      <View style={styles.commsPanel}>
+        <FlatList
+          data={commsLog.slice(-4)}
+          keyExtractor={(item) => item.id}
+          renderItem={({ item }) => (
+            <Text style={styles.commsText} numberOfLines={1}>
+              {` [${item.time}] @${item.sender}: ${item.text}`}
+            </Text>
+          )}
+          style={styles.commsFeed}
+        />
+        
+        <View style={styles.inputRow}>
+          <TextInput
+            style={styles.textInput}
+            value={textInput}
+            onChangeText={setTextInput}
+            placeholder="ENTER TACTICAL MESSAGE..."
+            placeholderTextColor="#555555"
+            underlineColorAndroid="transparent"
+          />
+          <TouchableOpacity
+            style={styles.transmitButton}
+            onPress={() => sendMessage(textInput)}
+            activeOpacity={0.8}
+          >
+            <Text style={styles.transmitButtonText}>[ TRANSMIT ]</Text>
+          </TouchableOpacity>
+        </View>
+
+        <View style={styles.macroRow}>
+          <TouchableOpacity style={styles.macroButton} onPress={() => sendMessage('🛑 HOLD')}>
+            <Text style={styles.macroButtonText}>[ 🛑 HOLD ]</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.macroButton} onPress={() => sendMessage('🚜 STUCK')}>
+            <Text style={styles.macroButtonText}>[ 🚜 STUCK ]</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.macroButton} onPress={() => sendMessage('⛽ LOW FUEL')}>
+            <Text style={styles.macroButtonText}>[ ⛽ LOW FUEL ]</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.macroButton} onPress={() => sendMessage('🟢 CLEAR')}>
+            <Text style={styles.macroButtonText}>[ 🟢 CLEAR ]</Text>
+          </TouchableOpacity>
+        </View>
+      </View>
 
       <SafeAreaView style={styles.overlayContainer}>
         {/* Top Panel: Shortcut Slider */}
@@ -1032,6 +1228,86 @@ const styles = StyleSheet.create({
     overflow: 'hidden',
     marginBottom: 4,
     textAlign: 'center',
+  },
+  commsPanel: {
+    position: 'absolute',
+    top: 325,
+    left: 16,
+    right: 16,
+    backgroundColor: 'rgba(10, 10, 10, 0.9)',
+    borderWidth: 1,
+    borderColor: '#333333',
+    borderRadius: 8,
+    padding: 12,
+    zIndex: 999,
+  },
+  commsFeed: {
+    maxHeight: 70,
+    marginBottom: 4,
+  },
+  commsText: {
+    color: '#00FF66',
+    fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
+    fontSize: 11,
+    lineHeight: 16,
+  },
+  inputRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: 6,
+    borderTopWidth: 1,
+    borderTopColor: '#2C2C2C',
+    paddingTop: 8,
+  },
+  textInput: {
+    flex: 1,
+    height: 36,
+    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+    borderWidth: 1,
+    borderColor: '#333333',
+    borderRadius: 4,
+    color: '#00FF66',
+    fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
+    fontSize: 12,
+    paddingHorizontal: 8,
+  },
+  transmitButton: {
+    marginLeft: 8,
+    backgroundColor: 'rgba(0, 255, 102, 0.1)',
+    borderWidth: 1,
+    borderColor: '#00FF66',
+    borderRadius: 4,
+    height: 36,
+    justifyContent: 'center',
+    paddingHorizontal: 12,
+  },
+  transmitButtonText: {
+    color: '#00FF66',
+    fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
+    fontSize: 11,
+    fontWeight: 'bold',
+  },
+  macroRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginTop: 8,
+  },
+  macroButton: {
+    flex: 1,
+    backgroundColor: 'rgba(30, 30, 30, 0.8)',
+    borderWidth: 1,
+    borderColor: '#333333',
+    borderRadius: 4,
+    paddingVertical: 6,
+    marginHorizontal: 2,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  macroButtonText: {
+    color: '#00FF66',
+    fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
+    fontSize: 9,
+    fontWeight: 'bold',
   },
 });
 
