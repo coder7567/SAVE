@@ -60,7 +60,7 @@ const RadarPulse = ({ color, size }) => {
   const renderRing = (animValue) => {
     const scale = animValue.interpolate({
       inputRange: [0, 1],
-      outputRange: [26 / size, 1.0],
+      outputRange: [0.8, 3.5],
     });
     const opacity = animValue.interpolate({
       inputRange: [0, 0.8, 1],
@@ -99,19 +99,19 @@ const RadarPulse = ({ color, size }) => {
 const HazardMarker = ({ hazard, onPress }) => {
   const isCritical = hazard.severity === 'CRITICAL';
   const color = isCritical ? '#FF3333' : '#FFCC00';
+  const size = isCritical ? 26 : 24;
 
   return (
     <Marker
       coordinate={hazard.coordinate}
       onPress={() => onPress(hazard)}
       anchor={{ x: 0.5, y: 0.5 }}
-      style={{ width: 96, height: 96 }}
     >
       <View style={styles.hazardMarkerWrapper}>
-        <RadarPulse color={color} size={90} />
-        <View style={[isCritical ? styles.criticalGlow : styles.minimalGlow, styles.hazardIcon]}>
+        <RadarPulse color={color} size={size} />
+        <View style={isCritical ? styles.criticalGlow : styles.minimalGlow}>
           {isCritical ? (
-            <Svg height={26} width={26} viewBox="0 0 26 26">
+            <Svg height={size} width={size} viewBox="0 0 26 26">
               {/* Solid Crimson Red Cross */}
               <Path
                 d="M 9,2 H 17 V 9 H 24 V 17 H 17 V 24 H 9 V 17 H 2 V 9 H 9 Z"
@@ -119,7 +119,7 @@ const HazardMarker = ({ hazard, onPress }) => {
               />
             </Svg>
           ) : (
-            <Svg height={24} width={24} viewBox="0 0 24 24">
+            <Svg height={size} width={size} viewBox="0 0 24 24">
               {/* Hollow Yellow Triangle */}
               <Polygon
                 points="12,2 2,22 22,22"
@@ -985,20 +985,11 @@ const styles = StyleSheet.create({
   hazardMarkerWrapper: {
     justifyContent: 'center',
     alignItems: 'center',
-    width: 96,
-    height: 96,
+    width: 60,
+    height: 60,
   },
   pulseContainer: {
     position: 'absolute',
-    width: 90,
-    height: 90,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  hazardIcon: {
-    width: 26,
-    height: 26,
-    zIndex: 2,
     justifyContent: 'center',
     alignItems: 'center',
   },
